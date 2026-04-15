@@ -1,0 +1,80 @@
+name: container-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: "HTTPS URL of the submitted package repo"
+        required: true
+      submission_id:
+        description: "Pantry submission ID"
+        required: true
+      callback_url:
+        description: "URL to POST the test result to"
+        required: true
+      callback_token:
+        description: "One-time token for the callback auth header"
+        required: true
+      is_bundle:
+        description: "true if the package is a multi-component bundle"
+        required: false
+        default: "false"
+      packages:
+        description: "JSON array of extra pip packages the harness needs"
+        required: false
+        default: "[]"
+      sdk_ref:
+        description: "Ref of jarvis-command-sdk to install (branch, tag, or SHA)"
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout runner scripts
+        uses: actions/checkout@v4
+        with:
+          path: runner
+
+      - name: Checkout submission repo
+        run: |
+          git clone --depth 1 "${{ github.event.inputs.repo_url }}" submission
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SDK and runner deps
+        run: |
+          pip install --upgrade pip
+          pip install "git+https://github.com/alexberardi/jarvis-command-sdk.git@${{ github.event.inputs.sdk_ref }}"
+          pip install pyyaml requests
+          extra=$(echo '${{ github.event.inputs.packages }}' | python -c 'import json,sys; print(" ".join(json.load(sys.stdin)))')
+          if [ -n "$extra" ]; then pip install $extra; fi
+
+      - name: Run harness
+        id: harness
+        env:
+          JARVIS_HARNESS_REPO_DIR: ${{ github.workspace }}/submission
+          JARVIS_HARNESS_COMMAND_DIR: ${{ github.workspace }}/submission
+          JARVIS_HARNESS_TEST_DIR: ${{ github.workspace }}
+        continue-on-error: true
+        run: |
+          python runner/harness.py > harness_output.json 2> harness_stderr.log
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Post callback
+        env:
+          CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
+        run: |
+          python runner/runner.py \
+            --output harness_output.json \
+            --stderr harness_stderr.log \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
