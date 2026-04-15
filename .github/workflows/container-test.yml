@@ -69,6 +69,15 @@ jobs:
           python runner/harness.py > harness_output.json 2> harness_stderr.log
           echo "exit_code=$?" >> $GITHUB_OUTPUT
 
+      - name: Show harness output
+        if: always()
+        run: |
+          echo "=== harness_output.json ==="
+          cat harness_output.json || true
+          echo ""
+          echo "=== harness_stderr.log ==="
+          cat harness_stderr.log || true
+
       - name: Post callback
         env:
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
