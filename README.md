@@ -25,7 +25,7 @@ VM per submission for free.
 | `callback_url` | Where to POST the result |
 | `callback_token` | One-time token scoped to a single submission |
 | `is_bundle` | `true` for multi-component bundles |
-| `packages` | JSON array of extra pip packages the harness needs |
+| `lockfile_content` | Pre-resolved pip lockfile (output of `pip-compile` or equivalent). Installed with `--only-binary=:all: --no-build-isolation --no-cache-dir` so no submitted-package `setup.py` ever runs on the GHA host. |
 | `sdk_ref` | Ref of `jarvis-command-sdk` to install (default `main`) |
 
 `harness.py` is vendored in this repo. Keep it in sync with

@@ -19,10 +19,10 @@ on:
         description: "true if the package is a multi-component bundle"
         required: false
         default: "false"
-      packages:
-        description: "JSON array of extra pip packages the harness needs"
+      lockfile_content:
+        description: "Pre-resolved pip lockfile (output of pip-compile or equivalent)"
         required: false
-        default: "[]"
+        default: ""
       sdk_ref:
         description: "Ref of jarvis-command-sdk to install (branch, tag, or SHA)"
         required: false
@@ -55,8 +55,12 @@ jobs:
           pip install --upgrade pip
           pip install "git+https://github.com/alexberardi/jarvis-command-sdk.git@${{ github.event.inputs.sdk_ref }}"
           pip install pyyaml requests
-          extra=$(echo '${{ github.event.inputs.packages }}' | python -c 'import json,sys; print(" ".join(json.load(sys.stdin)))')
-          if [ -n "$extra" ]; then pip install $extra; fi
+          lockfile='${{ github.event.inputs.lockfile_content }}'
+          if [ -n "$lockfile" ]; then
+            echo "$lockfile" > /tmp/submission-lockfile.txt
+            pip install -r /tmp/submission-lockfile.txt \
+              --only-binary=:all: --no-build-isolation --no-cache-dir
+          fi
 
       - name: Run harness
         id: harness
