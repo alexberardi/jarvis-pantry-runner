@@ -16,6 +16,18 @@ Fly machines can't run Docker-in-Docker, so pantry can't sandbox untrusted
 submission code on its own infra. GitHub Actions gives us a clean, isolated
 VM per submission for free.
 
+## Sandbox
+
+The harness runs inside `docker run --network=none --read-only --memory=128m`
+with a `tmpfs` at `/tmp`. The submission and SDK dirs are bind-mounted
+read-only; only a small `/output` dir is writable for the harness's JSON
+result. SDK and submitted-lockfile installs (the latter still under the
+`--only-binary=:all: --no-build-isolation` lockdown from #13) happen in a
+separate pre-stage docker step (network on) into a named volume that's
+mounted read-only into the sandbox. This is the defense against a malicious
+submission that tries to exfiltrate the callback token, hit external
+services, or chew CPU/RAM during `run()`.
+
 ## Workflow inputs
 
 | Input | Description |
