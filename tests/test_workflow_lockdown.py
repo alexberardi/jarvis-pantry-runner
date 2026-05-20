@@ -13,11 +13,11 @@ def workflow() -> dict:
     return yaml.safe_load(WORKFLOW_PATH.read_text())
 
 
-def _step(workflow: dict, name: str) -> dict:
-    for step in workflow["jobs"]["test"]["steps"]:
+def _step(workflow: dict, name: str, job: str = "test") -> dict:
+    for step in workflow["jobs"][job]["steps"]:
         if step.get("name") == name:
             return step
-    raise AssertionError(f"step {name!r} not found")
+    raise AssertionError(f"step {name!r} not found in job {job!r}")
 
 
 def _pre_stage_run(workflow: dict) -> str:
@@ -80,12 +80,14 @@ class TestHappyPath:
         assert "requests" in run
 
     def test_other_workflow_inputs_are_untouched(self, workflow):
+        # `nonce` replaces `callback_token` per #26 — the rest are unchanged
+        # from the prior shape this file was guarding.
         inputs = _inputs(workflow)
         assert set(inputs.keys()) == {
             "repo_url",
             "submission_id",
             "callback_url",
-            "callback_token",
+            "nonce",
             "is_bundle",
             "lockfile_content",
             "sdk_ref",
@@ -121,20 +123,17 @@ class TestEdgeCases:
     def test_workflow_permissions_are_unchanged(self, workflow):
         assert workflow["permissions"] == {"contents": "read"}
 
-    def test_harness_and_callback_steps_are_untouched(self, workflow):
+    def test_harness_step_contract_unchanged(self, workflow):
+        # Harness step lives in the `test` job; env-var contract still gets to
+        # the harness process via docker `-e`. Callback step shape is now
+        # covered by tests/test_workflow_callback_isolation.py since it lives
+        # in its own job after the #26 split.
         harness = _step(workflow, "Run harness in sandbox")
         assert harness.get("continue-on-error") is True
         run = harness["run"]
-        # Harness env-var contract still gets to the harness process — now
-        # passed in via docker `-e` instead of the step's `env:` block.
         assert "JARVIS_HARNESS_REPO_DIR" in run
         assert "JARVIS_HARNESS_COMMAND_DIR" in run
         assert "JARVIS_HARNESS_TEST_DIR" in run
-
-        callback = _step(workflow, "Post callback")
-        cb_env = callback.get("env", {})
-        assert "CALLBACK_URL" in cb_env
-        assert "CALLBACK_TOKEN" in cb_env
 
 
 class TestSandbox:

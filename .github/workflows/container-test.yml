@@ -12,8 +12,8 @@ on:
       callback_url:
         description: "URL to POST the test result to"
         required: true
-      callback_token:
-        description: "One-time token for the callback auth header"
+      nonce:
+        description: "Per-submission nonce mixed into the callback HMAC"
         required: true
       is_bundle:
         description: "true if the package is a multi-component bundle"
@@ -33,6 +33,9 @@ permissions:
 
 jobs:
   test:
+    # Runs submitted code (clone + harness inside docker sandbox).
+    # MUST NOT have access to the callback signing key — that key lives in
+    # the `pantry-callback` environment, gated to the `callback` job below.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -49,9 +52,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install host callback deps
-        run: pip install --no-cache-dir requests
 
       - name: Pre-stage sandbox image and deps
         env:
@@ -113,10 +113,52 @@ jobs:
           echo "=== harness_stderr.log ==="
           cat harness_stderr.log || true
 
+      - name: Upload harness artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-result
+          path: |
+            harness_output.json
+            harness_stderr.log
+          if-no-files-found: ignore
+
+  callback:
+    # Only this job has access to PANTRY_CALLBACK_SIGNING_KEY via the
+    # environment gate. It never executes submitted code — it just reads
+    # the harness artifact and posts the signed result back to Pantry.
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: pantry-callback
+    steps:
+      - name: Checkout runner scripts
+        uses: actions/checkout@v4
+        with:
+          path: runner
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install callback deps
+        run: pip install --no-cache-dir requests
+
+      - name: Download harness artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: harness-result
+          path: .
+        continue-on-error: true
+
       - name: Post callback
         env:
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
-          CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
+          SUBMISSION_ID: ${{ github.event.inputs.submission_id }}
+          NONCE: ${{ github.event.inputs.nonce }}
+          PANTRY_CALLBACK_SIGNING_KEY: ${{ secrets.PANTRY_CALLBACK_SIGNING_KEY }}
         run: |
           python runner/runner.py \
             --output harness_output.json \

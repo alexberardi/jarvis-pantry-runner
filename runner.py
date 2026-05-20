@@ -1,13 +1,21 @@
 """Post the harness result back to the pantry callback URL.
 
 Reads the harness JSON output, normalizes it to the ContainerResultCallback
-schema that pantry expects, and POSTs it with the one-time X-Pantry-Token
-header issued when this workflow was dispatched.
+schema that pantry expects, signs it with HMAC-SHA256 over
+``{submission_id}|{nonce}|{body_bytes}`` keyed by the
+``PANTRY_CALLBACK_SIGNING_KEY`` env var, and POSTs it with an
+``X-Pantry-HMAC`` header.
+
+The signing key is sourced from a GitHub Actions environment secret gated to
+the ``callback`` job — submitted package code (which runs in the ``test``
+job) never sees it.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -56,6 +64,18 @@ def _load_harness_output(output_path: Path, stderr_path: Path) -> dict:
     }
 
 
+def sign_callback(
+    *, submission_id: str, nonce: str, body_bytes: bytes, signing_key: str,
+) -> str:
+    """HMAC-SHA256 over `{submission_id}|{nonce}|{body_bytes}` as lowercase hex.
+
+    The body bytes are appended verbatim — Pantry reads ``request.body()`` to
+    recover the exact same bytes, no canonicalization layer in between.
+    """
+    msg = f"{submission_id}|{nonce}|".encode("utf-8") + body_bytes
+    return hmac.new(signing_key.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
@@ -64,15 +84,27 @@ def main() -> int:
     args = parser.parse_args()
 
     callback_url = os.environ["CALLBACK_URL"]
-    callback_token = os.environ["CALLBACK_TOKEN"]
+    submission_id = os.environ["SUBMISSION_ID"]
+    nonce = os.environ["NONCE"]
+    signing_key = os.environ["PANTRY_CALLBACK_SIGNING_KEY"]
 
     payload = _load_harness_output(args.output, args.stderr)
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = sign_callback(
+        submission_id=submission_id,
+        nonce=nonce,
+        body_bytes=body_bytes,
+        signing_key=signing_key,
+    )
 
     print(f"Posting result to {callback_url} (passed={payload['passed']}, run={args.run_url})")
     resp = requests.post(
         callback_url,
-        headers={"X-Pantry-Token": callback_token, "Content-Type": "application/json"},
-        json=payload,
+        data=body_bytes,
+        headers={
+            "X-Pantry-HMAC": signature,
+            "Content-Type": "application/json",
+        },
         timeout=30,
     )
     print(f"Callback response: {resp.status_code} {resp.text[:500]}")
