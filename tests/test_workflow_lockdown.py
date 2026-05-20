@@ -20,8 +20,14 @@ def _step(workflow: dict, name: str) -> dict:
     raise AssertionError(f"step {name!r} not found")
 
 
-def _install_run(workflow: dict) -> str:
-    return _step(workflow, "Install SDK and runner deps")["run"]
+def _pre_stage_run(workflow: dict) -> str:
+    """The pre-stage step is where SDK + submission lockfile are installed,
+    inside a docker volume, before the sandboxed harness runs."""
+    return _step(workflow, "Pre-stage sandbox image and deps")["run"]
+
+
+def _sandbox_run(workflow: dict) -> str:
+    return _step(workflow, "Run harness in sandbox")["run"]
 
 
 def _inputs(workflow: dict) -> dict:
@@ -41,25 +47,37 @@ class TestHappyPath:
         assert "lockfile" in desc or "pip-compile" in desc
 
     def test_install_step_pipes_lockfile_through_pip_install_dash_r(self, workflow):
-        run = _install_run(workflow)
-        assert "${{ github.event.inputs.lockfile_content }}" in run
-        assert "> /tmp/submission-lockfile.txt" in run
-        assert "pip install -r /tmp/submission-lockfile.txt" in run
+        step = _step(workflow, "Pre-stage sandbox image and deps")
+        run = step["run"]
+        # Lockfile content reaches the install via a workflow input → env var,
+        # written to a file, then `pip install -r <file>` against it. The
+        # ${{ ... }} interpolation may land in either `run` or the step's
+        # `env:` block, depending on how the indirection is wired.
+        env_values = " ".join(step.get("env", {}).values())
+        assert "${{ github.event.inputs.lockfile_content }}" in run + env_values
+        assert "submission-lockfile.txt" in run
+        assert "pip install" in run and "-r " in run and "submission-lockfile.txt" in run
         assert "--only-binary=:all:" in run
         assert "--no-build-isolation" in run
         assert "--no-cache-dir" in run
-        assert "if [ -n" in run
-        assert "then" in run
+        # Guarded behind an emptiness check so an empty lockfile doesn't
+        # trigger a spurious `pip install -r`.
+        assert "if [" in run
         assert "fi" in run
 
-    def test_sdk_and_baseline_pip_installs_are_unchanged(self, workflow):
-        run = _install_run(workflow)
-        assert "pip install --upgrade pip" in run
-        assert (
-            'pip install "git+https://github.com/alexberardi/jarvis-command-sdk.git@${{ github.event.inputs.sdk_ref }}"'
-            in run
-        )
-        assert "pip install pyyaml requests" in run
+    def test_sdk_install_pinned_to_input_ref(self, workflow):
+        run = _pre_stage_run(workflow)
+        assert "git+https://github.com/alexberardi/jarvis-command-sdk.git@" in run
+        # The ref must come from the sdk_ref input — either via direct
+        # interpolation or an env-var indirection set from that input.
+        env = _step(workflow, "Pre-stage sandbox image and deps").get("env", {})
+        sdk_ref_source = env.get("SDK_REF", "")
+        assert "${{ github.event.inputs.sdk_ref }}" in run or "${{ github.event.inputs.sdk_ref }}" in sdk_ref_source
+
+    def test_baseline_runtime_deps_present(self, workflow):
+        run = _pre_stage_run(workflow)
+        assert "pyyaml" in run
+        assert "requests" in run
 
     def test_other_workflow_inputs_are_untouched(self, workflow):
         inputs = _inputs(workflow)
@@ -76,7 +94,6 @@ class TestHappyPath:
     def test_readme_documents_lockfile_content_input(self):
         readme = README_PATH.read_text()
         assert "lockfile_content" in readme
-        assert "packages" not in readme.split("## Workflow inputs")[1].split("##")[0] or "lockfile" in readme
         lower = readme.lower()
         assert "lockfile" in lower or "pip-compile" in lower or "pre-resolved" in lower
 
@@ -87,13 +104,13 @@ class TestEdgeCases:
         assert "packages" not in inputs
 
     def test_install_step_does_not_reference_old_packages_input(self, workflow):
-        run = _install_run(workflow)
+        run = _pre_stage_run(workflow)
         assert "github.event.inputs.packages" not in run
         assert "json.load(sys.stdin)" not in run
         assert "pip install $extra" not in run
 
     def test_install_step_does_not_install_from_source_anywhere_in_extras_path(self, workflow):
-        run = _install_run(workflow)
+        run = _pre_stage_run(workflow)
         assert "--no-binary" not in run
         assert "--only-binary=:all:" in run
 
@@ -105,14 +122,59 @@ class TestEdgeCases:
         assert workflow["permissions"] == {"contents": "read"}
 
     def test_harness_and_callback_steps_are_untouched(self, workflow):
-        harness = _step(workflow, "Run harness")
+        harness = _step(workflow, "Run harness in sandbox")
         assert harness.get("continue-on-error") is True
-        env = harness.get("env", {})
-        assert "JARVIS_HARNESS_REPO_DIR" in env
-        assert "JARVIS_HARNESS_COMMAND_DIR" in env
-        assert "JARVIS_HARNESS_TEST_DIR" in env
+        run = harness["run"]
+        # Harness env-var contract still gets to the harness process — now
+        # passed in via docker `-e` instead of the step's `env:` block.
+        assert "JARVIS_HARNESS_REPO_DIR" in run
+        assert "JARVIS_HARNESS_COMMAND_DIR" in run
+        assert "JARVIS_HARNESS_TEST_DIR" in run
 
         callback = _step(workflow, "Post callback")
         cb_env = callback.get("env", {})
         assert "CALLBACK_URL" in cb_env
         assert "CALLBACK_TOKEN" in cb_env
+
+
+class TestSandbox:
+    """Sandbox invariants (#11): the harness must run inside a docker
+    container with no network, a read-only rootfs, and a memory cap, so a
+    malicious submission can't exfiltrate the callback token or chew
+    runner resources during run()."""
+
+    def test_harness_runs_inside_docker(self, workflow):
+        run = _sandbox_run(workflow)
+        assert "docker run" in run
+
+    def test_sandbox_has_no_network(self, workflow):
+        assert "--network=none" in _sandbox_run(workflow)
+
+    def test_sandbox_rootfs_is_read_only(self, workflow):
+        assert "--read-only" in _sandbox_run(workflow)
+
+    def test_sandbox_has_memory_cap(self, workflow):
+        assert "--memory=128m" in _sandbox_run(workflow)
+
+    def test_sandbox_provides_writable_tmpfs(self, workflow):
+        # Read-only rootfs would otherwise block Python's transient writes.
+        assert "--tmpfs /tmp" in _sandbox_run(workflow)
+
+    def test_submission_is_mounted_read_only(self, workflow):
+        run = _sandbox_run(workflow)
+        assert "/submission:ro" in run
+
+    def test_runner_scripts_mounted_read_only(self, workflow):
+        run = _sandbox_run(workflow)
+        assert "/runner:ro" in run
+
+    def test_deps_volume_mounted_read_only_into_sandbox(self, workflow):
+        # Deps are populated in the pre-stage step (network on) and the
+        # sandbox sees them read-only — submitted code can't poison them.
+        run = _sandbox_run(workflow)
+        assert "harness-deps:/deps:ro" in run
+
+    def test_sandbox_has_no_pip_install(self, workflow):
+        # All installs happen in the pre-stage step. The sandbox must not
+        # reach for the network even for SDK install.
+        assert "pip install" not in _sandbox_run(workflow)

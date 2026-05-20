@@ -50,28 +50,59 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install SDK and runner deps
-        run: |
-          pip install --upgrade pip
-          pip install "git+https://github.com/alexberardi/jarvis-command-sdk.git@${{ github.event.inputs.sdk_ref }}"
-          pip install pyyaml requests
-          lockfile='${{ github.event.inputs.lockfile_content }}'
-          if [ -n "$lockfile" ]; then
-            echo "$lockfile" > /tmp/submission-lockfile.txt
-            pip install -r /tmp/submission-lockfile.txt \
-              --only-binary=:all: --no-build-isolation --no-cache-dir
-          fi
+      - name: Install host callback deps
+        run: pip install --no-cache-dir requests
 
-      - name: Run harness
-        id: harness
+      - name: Pre-stage sandbox image and deps
         env:
-          JARVIS_HARNESS_REPO_DIR: ${{ github.workspace }}/submission
-          JARVIS_HARNESS_COMMAND_DIR: ${{ github.workspace }}/submission
-          JARVIS_HARNESS_TEST_DIR: ${{ github.workspace }}
+          SDK_REF: ${{ github.event.inputs.sdk_ref }}
+          LOCKFILE_CONTENT: ${{ github.event.inputs.lockfile_content }}
+        run: |
+          docker pull python:3.11-slim
+          docker volume create harness-deps
+          mkdir -p stage
+          printf '%s' "$LOCKFILE_CONTENT" > stage/submission-lockfile.txt
+          docker run --rm \
+            -v harness-deps:/deps \
+            -v "$GITHUB_WORKSPACE/stage:/stage:ro" \
+            -e SDK_REF="$SDK_REF" \
+            python:3.11-slim \
+            sh -c '
+              set -e
+              pip install --no-cache-dir --target=/deps pyyaml requests "git+https://github.com/alexberardi/jarvis-command-sdk.git@${SDK_REF}"
+              if [ -s /stage/submission-lockfile.txt ]; then
+                pip install --no-cache-dir --target=/deps -r /stage/submission-lockfile.txt \
+                  --only-binary=:all: --no-build-isolation
+              fi
+            '
+
+      - name: Run harness in sandbox
+        id: harness
         continue-on-error: true
         run: |
-          python runner/harness.py > harness_output.json 2> harness_stderr.log
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
+          mkdir -p output
+          set +e
+          docker run --rm \
+            --network=none \
+            --read-only \
+            --memory=128m \
+            --tmpfs /tmp:rw,size=64m \
+            -v "$GITHUB_WORKSPACE/runner:/runner:ro" \
+            -v "$GITHUB_WORKSPACE/submission:/submission:ro" \
+            -v harness-deps:/deps:ro \
+            -v "$GITHUB_WORKSPACE/output:/output:rw" \
+            -e PYTHONPATH=/deps \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -e JARVIS_HARNESS_REPO_DIR=/submission \
+            -e JARVIS_HARNESS_COMMAND_DIR=/submission \
+            -e JARVIS_HARNESS_TEST_DIR=/output \
+            python:3.11-slim \
+            sh -c 'python /runner/harness.py > /output/harness_output.json 2> /output/harness_stderr.log'
+          exit_code=$?
+          set -e
+          cp output/harness_output.json harness_output.json 2>/dev/null || echo '{}' > harness_output.json
+          cp output/harness_stderr.log harness_stderr.log 2>/dev/null || : > harness_stderr.log
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
 
       - name: Show harness output
         if: always()
