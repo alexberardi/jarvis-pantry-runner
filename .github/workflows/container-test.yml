@@ -69,6 +69,11 @@ jobs:
             python:3.11-slim \
             sh -c '
               set -e
+              # python:3.11-slim has no git; pip needs it for git+https URLs.
+              # Installed only in this throwaway pre-stage container — the
+              # sandbox container below stays slim-untouched.
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends git
               pip install --no-cache-dir --target=/deps pyyaml requests "git+https://github.com/alexberardi/jarvis-command-sdk.git@${SDK_REF}"
               if [ -s /stage/submission-lockfile.txt ]; then
                 pip install --no-cache-dir --target=/deps -r /stage/submission-lockfile.txt \
