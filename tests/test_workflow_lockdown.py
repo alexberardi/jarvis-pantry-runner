@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -123,6 +124,24 @@ class TestEdgeCases:
         # every install and broaden the build-hook attack surface.
         run = _pre_stage_run(workflow)
         assert "--no-binary" not in run
+
+    def test_pre_stage_run_block_is_valid_bash(self, workflow):
+        # Catches things like an unescaped apostrophe inside the inner
+        # `sh -c '...'` heredoc, which terminates the quoted string and
+        # crashes the pre-stage script with a "syntax error near unexpected
+        # token" before pip ever runs. A failure here would surface to the
+        # user as the misleading "harness produced no output" envelope.
+        step = _step(workflow, "Pre-stage sandbox image and deps")
+        result = subprocess.run(
+            ["bash", "-n"],
+            input=step["run"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"Pre-stage run block has shell syntax errors:\n{result.stderr}"
+        )
 
     def test_test_job_token_is_zeroed(self, workflow):
         # The test job runs untrusted submission code paths (build hooks,
