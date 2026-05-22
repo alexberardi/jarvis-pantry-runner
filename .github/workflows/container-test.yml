@@ -36,7 +36,12 @@ jobs:
     # Runs submitted code (clone + harness inside docker sandbox).
     # MUST NOT have access to the callback signing key — that key lives in
     # the `pantry-callback` environment, gated to the `callback` job below.
+    # `permissions: {}` zeroes out the GITHUB_TOKEN so a malicious build hook
+    # in a submission's transitive deps can't use it for anything. The runner
+    # repo is public, so actions/checkout still works without a token; the
+    # submission is cloned via plain `git clone` over HTTPS.
     runs-on: ubuntu-latest
+    permissions: {}
     timeout-minutes: 10
     steps:
       - name: Checkout runner scripts
@@ -74,10 +79,17 @@ jobs:
               # sandbox container below stays slim-untouched.
               apt-get update -qq
               apt-get install -y -qq --no-install-recommends git
-              pip install --no-cache-dir --target=/deps pyyaml requests "git+https://github.com/alexberardi/jarvis-command-sdk.git@${SDK_REF}"
+              pip install --isolated --no-cache-dir --target=/deps pyyaml requests "git+https://github.com/alexberardi/jarvis-command-sdk.git@${SDK_REF}"
               if [ -s /stage/submission-lockfile.txt ]; then
-                pip install --no-cache-dir --target=/deps -r /stage/submission-lockfile.txt \
-                  --only-binary=:all: --no-build-isolation
+                # Submission deps install with --isolated (ignores ambient pip
+                # config/env) but WITHOUT --only-binary=:all: so legitimate
+                # sdist-only deps (e.g. pydora's `blowfish`) can install. The
+                # pre-stage container is throwaway, has no Pantry secrets in
+                # env, and the harness job that uses /deps runs with
+                # --network=none and --read-only, so a malicious build hook
+                # has no useful blast radius beyond faking a passing test —
+                # which the static-analysis + AI-review stages already gate.
+                pip install --isolated --no-cache-dir --target=/deps -r /stage/submission-lockfile.txt
               fi
             '
 
