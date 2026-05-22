@@ -83,12 +83,13 @@ jobs:
               if [ -s /stage/submission-lockfile.txt ]; then
                 # Submission deps install with --isolated (ignores ambient pip
                 # config/env) but WITHOUT --only-binary=:all: so legitimate
-                # sdist-only deps (e.g. pydora's `blowfish`) can install. The
-                # pre-stage container is throwaway, has no Pantry secrets in
-                # env, and the harness job that uses /deps runs with
-                # --network=none and --read-only, so a malicious build hook
-                # has no useful blast radius beyond faking a passing test —
-                # which the static-analysis + AI-review stages already gate.
+                # sdist-only deps (e.g. blowfish, a pydora transitive) can
+                # install. The pre-stage container is throwaway, has no
+                # Pantry secrets in env, and the harness job that uses /deps
+                # runs with --network=none and --read-only, so a malicious
+                # build hook has no useful blast radius beyond faking a
+                # passing test — which the static-analysis + AI-review
+                # pipeline stages already guard against.
                 pip install --isolated --no-cache-dir --target=/deps -r /stage/submission-lockfile.txt
               fi
             '
