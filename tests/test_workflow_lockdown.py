@@ -57,8 +57,13 @@ class TestHappyPath:
         assert "${{ github.event.inputs.lockfile_content }}" in run + env_values
         assert "submission-lockfile.txt" in run
         assert "pip install" in run and "-r " in run and "submission-lockfile.txt" in run
-        assert "--only-binary=:all:" in run
-        assert "--no-build-isolation" in run
+        # --isolated keeps ambient pip config/env out of the install. We
+        # deliberately do NOT pin to wheels: some legitimate transitive deps
+        # are sdist-only on PyPI (e.g. pydora's blowfish==0.6.1). The
+        # pre-stage container is throwaway and has no Pantry secrets in env;
+        # the harness sandbox that consumes /deps still runs --network=none
+        # --read-only, so a malicious build hook can't pivot or exfiltrate.
+        assert "--isolated" in run
         assert "--no-cache-dir" in run
         # Guarded behind an emptiness check so an empty lockfile doesn't
         # trigger a spurious `pip install -r`.
@@ -111,10 +116,20 @@ class TestEdgeCases:
         assert "json.load(sys.stdin)" not in run
         assert "pip install $extra" not in run
 
-    def test_install_step_does_not_install_from_source_anywhere_in_extras_path(self, workflow):
+    def test_install_step_does_not_force_source_only_builds(self, workflow):
+        # Submission lockfile installs use whichever distribution PyPI offers
+        # — prefer wheels when available, fall back to sdist. We must never
+        # FORCE source-only builds (`--no-binary`) because that would slow
+        # every install and broaden the build-hook attack surface.
         run = _pre_stage_run(workflow)
         assert "--no-binary" not in run
-        assert "--only-binary=:all:" in run
+
+    def test_test_job_token_is_zeroed(self, workflow):
+        # The test job runs untrusted submission code paths (build hooks,
+        # harness mock-run). Give its implicit GITHUB_TOKEN no scopes so a
+        # malicious build hook can't pivot through the GH API. The runner
+        # repo is public, so actions/checkout still works token-less.
+        assert workflow["jobs"]["test"].get("permissions") == {}
 
     def test_lockfile_input_default_is_empty_string(self, workflow):
         inputs = _inputs(workflow)
